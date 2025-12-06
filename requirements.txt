@@ -1,0 +1,9 @@
+pandas
+geopandas
+shapely
+scikit-learn
+openai
+streamlit
+pyarrow
+fastparquet
+psycopg2-binary
