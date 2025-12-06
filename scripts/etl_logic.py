@@ -1,69 +1,167 @@
 import pandas as pd
+import numpy as np
+import re
 import os
+from rapidfuzz import process, fuzz
+from pythainlp.tokenize import word_tokenize
 from scripts.model_logic import calculate_final_urgency
 
+# --- A. CONFIGURATION & MAPPINGS ---
+def get_district_mapping():
+    # A sample of the mapping from your notebook (Expand this with your full list)
+    return {
+        'เขตพระนคร': 'Phra Nakhon', 'พระนคร': 'Phra Nakhon',
+        'เขตดุสิต': 'Dusit', 'ดุสิต': 'Dusit',
+        'เขตหนองจอก': 'Nong Chok', 'หนองจอก': 'Nong Chok',
+        'เขตบางรัก': 'Bang Rak', 'บางรัก': 'Bang Rak',
+        'เขตบางเขน': 'Bang Khen', 'บางเขน': 'Bang Khen',
+        'เขตบางกะปิ': 'Bang Kapi', 'บางกะปิ': 'Bang Kapi',
+        'เขตปทุมวัน': 'Pathum Wan', 'ปทุมวัน': 'Pathum Wan',
+        'เขตป้อมปราบศัตรูพ่าย': 'Pom Prap Sattru Phai',
+        'เขตพระโขนง': 'Phra Khanong', 'พระโขนง': 'Phra Khanong',
+        'เขตมีนบุรี': 'Min Buri', 'มีนบุรี': 'Min Buri',
+        'เขตลาดกระบัง': 'Lat Krabang', 'ลาดกระบัง': 'Lat Krabang',
+        'เขตยานนาวา': 'Yan Nawa', 'ยานนาวา': 'Yan Nawa',
+        # ... Add the rest of your 50 districts here
+    }
+
+# --- B. CLEANING HELPERS (From your Notebook) ---
+
+def parse_coords(val):
+    """
+    Robust coordinate parser from your notebook.
+    """
+    if not isinstance(val, str) or val.strip() == "":
+        return np.nan, np.nan
+    
+    s = val.strip()
+    try:
+        # Case 1: "100.5, 13.7"
+        if "," in s:
+            parts = s.split(",")
+            if len(parts) == 2:
+                # Usually Traffy data is Lon, Lat
+                v1, v2 = float(parts[0]), float(parts[1])
+                # Thai Lat is approx 5-20, Lon is 97-105
+                if 5 < v2 < 21 and 97 < v1 < 106:
+                    return v2, v1 # Lat, Lon
+                elif 5 < v1 < 21 and 97 < v2 < 106:
+                    return v1, v2 # Lat, Lon
+        return np.nan, np.nan
+    except:
+        return np.nan, np.nan
+
+def clean_text(text):
+    """
+    Standardizes text by removing 'Bangkok', 'District' prefixes.
+    """
+    if not isinstance(text, str): return ""
+    text = text.strip()
+    text = re.sub(r"แขวง|เขต|กรุงเทพมหานคร|กรุงเทพฯ|กรุงเทพ|จังหวัด", "", text)
+    text = re.sub(r"[()\-_,]", " ", text)
+    return text.strip()
+
+def standardize_district(district_name, mapping):
+    """
+    Uses RapidFuzz to find the best English match for a Thai district name.
+    """
+    if not isinstance(district_name, str): return None
+    clean_name = clean_text(district_name)
+    
+    # 1. Exact Match
+    if clean_name in mapping:
+        return mapping[clean_name]
+    
+    # 2. Fuzzy Match (Threshold 80)
+    match = process.extractOne(clean_name, mapping.keys(), scorer=fuzz.WRatio)
+    if match and match[1] >= 80:
+        return mapping[match[0]]
+    
+    return None
+
+def is_nonsense_comment(text):
+    """
+    Filters out spam or empty comments (e.g., 'test', '...', short text).
+    """
+    if not isinstance(text, str): return True
+    if len(text) < 3: return True
+    
+    tokens = word_tokenize(text, engine="newmm")
+    # Filter out whitespace/junk tokens
+    valid_tokens = [t for t in tokens if t.strip() and len(t) > 1]
+    
+    if len(valid_tokens) == 0: return True
+    
+    # Check for repetitive spam (e.g., "aaaaa")
+    if len(set(valid_tokens)) == 1 and len(valid_tokens) > 3:
+        return True
+        
+    return False
+
+# --- C. MAIN PRE-PROCESSING ---
+
+def preprocess_data(df):
+    print("Starts Pre-processing & Cleaning...")
+    
+    # 1. Parse Coordinates
+    coords = df['coords'].apply(parse_coords)
+    df['latitude'] = coords.apply(lambda x: x[0])
+    df['longitude'] = coords.apply(lambda x: x[1])
+    
+    # 2. Drop invalid locations
+    df = df.dropna(subset=['latitude', 'longitude'])
+    
+    # 3. Clean Text & District
+    mapping = get_district_mapping()
+    df['district_clean'] = df['district'].apply(lambda x: standardize_district(x, mapping))
+    
+    # 4. Filter Nonsense Comments
+    # We keep the row but flag it, or drop it. Here we drop for cleaner analytics.
+    df['is_spam'] = df['comment'].apply(is_nonsense_comment)
+    df_clean = df[~df['is_spam']].copy()
+    
+    # 5. Drop Unused Columns (as per notebook)
+    cols_to_drop = ['star', 'photo', 'photo_after', 'is_spam']
+    df_clean = df_clean.drop(columns=[c for c in cols_to_drop if c in df_clean.columns])
+    
+    print(f"Data cleaned. Rows remaining: {len(df_clean)} (dropped {len(df) - len(df_clean)})")
+    return df_clean
+
+# --- D. PIPELINE ENTRY POINT ---
+
 def process_new_data(new_csv_path, master_parquet_path, poi_csv_path):
-    """
-    Reads new CSV data, runs AI enrichment, and merges it into the Master Parquet file.
-    """
-    # --- 1. Load Data ---
-    print(f"Loading new data from {new_csv_path}...")
+    # 1. Load
     try:
         new_df = pd.read_csv(new_csv_path)
     except FileNotFoundError:
-        print("New data file not found. Skipping.")
         return None
 
-    # Load POI data (Schools/Hospitals)
+    # Load POI
     try:
         poi_df = pd.read_csv(poi_csv_path)
     except FileNotFoundError:
-        # Fallback if POI file is missing, create empty structure to prevent crash
-        print("Warning: POI data not found. Distance calculations will be 0.")
-        poi_df = pd.DataFrame(columns=['lat', 'lon', 'name'])
+        poi_df = pd.DataFrame(columns=['lat', 'lon'])
 
-    # --- 2. Preprocessing ---
-    # Convert 'coords' string "13.75,100.50" to float columns
-    # We use errors='coerce' to turn bad data into NaN
-    new_df['latitude'] = pd.to_numeric(new_df['coords'].str.split(',').str[1], errors='coerce')
-    new_df['longitude'] = pd.to_numeric(new_df['coords'].str.split(',').str[0], errors='coerce')
+    # 2. PRE-PROCESS (The new logic)
+    clean_df = preprocess_data(new_df)
     
-    # Ensure timestamp is datetime
-    new_df['timestamp'] = pd.to_datetime(new_df['timestamp'], errors='coerce')
+    if clean_df.empty:
+        print("No valid data after cleaning.")
+        return None
 
-    # --- 3. Run AI & Urgency Logic ---
-    print("Running AI Classification & Urgency Scoring...")
-    # This calls the function we defined in scripts/model_logic.py
-    processed_df = calculate_final_urgency(new_df, poi_df)
+    # 3. AI SCORING (Uses the clean data)
+    final_df = calculate_final_urgency(clean_df, poi_df)
 
-    # --- 4. Save/Merge Logic (The part you requested) ---
-    print(f"Merging {len(processed_df)} new records into master dataset...")
-    
+    # 4. UPSERT / SAVE
     try:
-        # Try to read the existing master file
         master_df = pd.read_parquet(master_parquet_path)
-        
-        # UPSERT STRATEGY:
-        # 1. Identify IDs in the new batch
-        new_ids = processed_df['ticket_id'].unique()
-        
-        # 2. Remove rows from Master that match these IDs (to avoid duplicates)
-        # This effectively "updates" old tickets with the fresh version
+        new_ids = final_df['ticket_id'].unique()
         master_df = master_df[~master_df['ticket_id'].isin(new_ids)]
-        
-        # 3. Concatenate the filtered Master with the Fresh Data
-        updated_master_df = pd.concat([master_df, processed_df], ignore_index=True)
-        
+        updated_master = pd.concat([master_df, final_df], ignore_index=True)
     except (FileNotFoundError, OSError):
-        # If master file doesn't exist (first run), the new data IS the master
-        print("Master dataset not found or empty. Creating a new one.")
-        updated_master_df = processed_df
+        updated_master = final_df
 
-    # Save back to Parquet
-    # Create directory if it doesn't exist
     os.makedirs(os.path.dirname(master_parquet_path), exist_ok=True)
+    updated_master.to_parquet(master_parquet_path)
     
-    updated_master_df.to_parquet(master_parquet_path)
-    
-    print(f"Merge complete. Master dataset now has {len(updated_master_df)} records.")
-    return updated_master_df
+    return updated_master
