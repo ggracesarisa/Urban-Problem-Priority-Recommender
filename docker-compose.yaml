@@ -58,6 +58,10 @@ services:
     command: scheduler
     depends_on:
       - airflow-init
+    deploy:
+      resources:
+        limits:
+          memory: 8G
 
   # Your Visualization App
   streamlit:

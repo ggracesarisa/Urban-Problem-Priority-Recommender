@@ -7,3 +7,7 @@ streamlit
 pyarrow
 fastparquet
 psycopg2-binary
+torch
+transformers
+sentencepiece
+haversine
