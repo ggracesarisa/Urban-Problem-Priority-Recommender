@@ -3,6 +3,10 @@ from airflow.operators.python import PythonOperator
 from datetime import datetime
 import pandas as pd
 import os
+import sys
+
+# Add parent directory to path to import scripts
+sys.path.insert(0, '/opt/airflow')
 
 # Import your scripts
 from scripts.etl_logic import process_new_data
