@@ -12,22 +12,49 @@ st.title("Bangkok Traffy Fondue Data Visualization")
 # Load and prepare data
 @st.cache_data
 def load_data():
-    # Try to load actual data from DAG output
     parquet_path = 'data/master_dataset.parquet'
     
     if os.path.exists(parquet_path):
         data = pd.read_parquet(parquet_path)
     else:
         st.warning(f"Data file not found at {parquet_path}. Please ensure the Airflow DAG has run.")
-        # Return empty dataframe with expected columns
-        data = pd.DataFrame(columns=[
-            'ticket_id', 'organization', 'comment', 'address', 
-            'lat', 'lon', 'timestamp', 'predicted_category', 
-            'urgency_score', 'state', 'district'
-        ])
+        data = pd.DataFrame()
 
-    # Data cleaning
+    # --- FIX 1: Remove Duplicate Columns ---
+    # This is the magic line that fixes your current error.
+    # It keeps the first occurrence of a column name and drops the rest.
+    data = data.loc[:, ~data.columns.duplicated()]
+
+    # --- FIX 2: Ensure Lat/Lon are Numeric ---
+    # Sometimes they load as text strings, which breaks the math.
+    # We force them to be numbers (coercing errors to NaN).
+    if 'lat' in data.columns:
+        data['lat'] = pd.to_numeric(data['lat'], errors='coerce')
+    if 'lon' in data.columns:
+        data['lon'] = pd.to_numeric(data['lon'], errors='coerce')
+
+    # --- FIX 3: Add Missing Columns (Safety Defaults) ---
+    required_defaults = {
+        'lat': np.nan, 
+        'lon': np.nan, 
+        'predicted_category': 'Unspecified',
+        'district': 'Unknown',
+        'state': 'New',
+        'urgency_score': 0.0,
+        'ticket_id': 'Unknown',
+        'organization': '-',
+        'comment': '-',
+        'address': '-',
+        'timestamp': pd.Timestamp.now()
+    }
+
+    for col, default_val in required_defaults.items():
+        if col not in data.columns:
+            data[col] = default_val
+
+    # Clean up coordinates
     data.dropna(subset=['lat', 'lon'], inplace=True)
+    
     return data
 
 # Load data
@@ -146,8 +173,8 @@ if len(filtered_data) > 0:
         pdk.Deck(
             layers=[urgency_layer],
             initial_view_state=pdk.ViewState(
-                latitude=filtered_data['lat'].mean(),
-                longitude=filtered_data['lon'].mean(),
+                latitude=float(filtered_data['lat'].mean()),
+                longitude=float(filtered_data['lon'].mean()),
                 zoom=12,
                 pitch=0
             ),
@@ -260,8 +287,8 @@ try:
         pdk.Deck(
             layers=[kde_layer],
             initial_view_state=pdk.ViewState(
-                latitude=filtered_data['lat'].mean(),
-                longitude=filtered_data['lon'].mean(),
+                latitude=float(filtered_data['lat'].mean()),
+                longitude=float(filtered_data['lon'].mean()),
                 zoom=12,
                 pitch=0
             ),
