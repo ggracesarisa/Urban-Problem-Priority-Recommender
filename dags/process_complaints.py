@@ -62,7 +62,7 @@ with DAG(
     process_task = PythonOperator(
         task_id='process_traffy_data',
         python_callable=run_etl_task,
-        execution_timeout=timedelta(minutes=30),
+        execution_timeout=timedelta(minutes=120),
     )
 
     scrape_task >> process_task
