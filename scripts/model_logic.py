@@ -85,7 +85,7 @@ def predict_problem_type_and_severity(df):
     if student_model is None:
         # 1. Take a sample (e.g., 2,000 rows) to teach the student
         # If df is smaller than 2000, use all of it.
-        sample_size = min(len(df), 500)
+        sample_size = min(len(df), 50)
         
         print(f"Sampling {sample_size} rows to train the model...")
         
