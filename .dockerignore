@@ -1,0 +1,11 @@
+# Ignore the data folder during the build process
+data/
+!data/.gitkeep
+
+# Ignore git history and cached files
+.git
+__pycache__
+*.pyc
+.ipynb_checkpoints
+.DS_Store
+.env

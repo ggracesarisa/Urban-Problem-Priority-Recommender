@@ -1,7 +1,12 @@
-version: '3.8'
+# version: '3.8'  
 
 x-airflow-common: &airflow-common
-  build: .
+  # TELL DOCKER TO USE YOUR MANUAL BUILD:
+  image: traffy_airflow_custom:latest
+  
+  # DISABLE AUTO-BUILD (Important!):
+  # build: .
+  
   env_file: .env
   environment:
     &airflow-common-env
@@ -10,7 +15,6 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__FERNET_KEY: ''
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-    # Mount the data folders so Airflow can see them
   volumes:
     - ./dags:/opt/airflow/dags
     - ./scripts:/opt/airflow/scripts
