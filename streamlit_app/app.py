@@ -244,78 +244,91 @@ if len(filtered_data) > 0:
 # Kernel Density Estimation Analysis
 st.subheader("Kernel Density Estimation (KDE) Statistics")
 
-try:
-    # Prepare coordinates
-    coords = filtered_data[['lat', 'lon']].values
+# FIX: Check if we have enough data points
+if len(filtered_data) < 2:
+    st.info("KDE Analysis requires at least 2 data points. Please select a larger date range or more districts.")
+else:
+    try:
+        # Prepare coordinates
+        coords = filtered_data[['lat', 'lon']].values
 
-    # Fit KDE model
-    kde = KernelDensity(bandwidth=0.005, kernel='gaussian')
-    kde.fit(coords)
+        # Fit KDE model
+        # Bandwidth needs to be adjusted based on data spread, but 0.005 is a safe default for city-scale
+        kde = KernelDensity(bandwidth=0.005, kernel='gaussian')
+        kde.fit(coords)
+        
+        # Calculate density score for each point
+        log_density = kde.score_samples(coords)
+        density = np.exp(log_density)
+        
+        # Add density scores to dataframe
+        filtered_data['density'] = density
+        
+        # FIX: Handle normalization safely to avoid Divide By Zero (NaN)
+        d_min = density.min()
+        d_max = density.max()
+        
+        if d_max == d_min:
+            # If all points have equal density (rare, but possible), set all to 0.5 (medium)
+            filtered_data['density_normalized'] = 0.5
+        else:
+            filtered_data['density_normalized'] = (density - d_min) / (d_max - d_min)
+        
+        # Format density
+        filtered_data['density_formatted'] = filtered_data['density'].apply(lambda x: f"{x:.4f}")
+        
+        # Create color mapping based on density
+        def density_to_color(density_normalized):
+            # Ensure value is valid before converting (Double safety)
+            if pd.isna(density_normalized):
+                return [0, 0, 255, 160] # Default blue if NaN
+                
+            r = int(density_normalized * 255)
+            g = int((1 - abs(2 * density_normalized - 1)) * 255)
+            b = int((1 - density_normalized) * 255)
+            return [r, g, b, 160] 
+        
+        # Apply color mapping
+        filtered_data['density_color'] = filtered_data['density_normalized'].apply(density_to_color)
     
-    # Calculate density score for each point
-    log_density = kde.score_samples(coords)
-    density = np.exp(log_density)
-    
-    # Add density scores to dataframe
-    filtered_data['density'] = density
-    filtered_data['density_normalized'] = (density - density.min()) / (density.max() - density.min())
-    
-    # Format density and timestamp for tooltip
-    filtered_data['density_formatted'] = filtered_data['density'].apply(lambda x: f"{x:.4f}")
-    
-    # Create color mapping based on density (blue = low, red = high)
-    def density_to_color(density_normalized):
-        r = int(density_normalized * 255)
-        g = int((1 - abs(2 * density_normalized - 1)) * 255)
-        b = int((1 - density_normalized) * 255)
-        return [r, g, b, 160]  # Added alpha channel
-    
-    # Apply color mapping
-    filtered_data['density_color'] = filtered_data['density_normalized'].apply(density_to_color)
- 
-    # Create scatter layer for KDE
-    kde_layer = pdk.Layer(
-        "ScatterplotLayer",
-        filtered_data,
-        get_position=['lon', 'lat'],
-        get_color='density_color',
-        get_radius=100,
-        pickable=True,
-    )
+        # Create scatter layer for KDE
+        kde_layer = pdk.Layer(
+            "ScatterplotLayer",
+            filtered_data,
+            get_position=['lon', 'lat'],
+            get_color='density_color',
+            get_radius=100,
+            pickable=True,
+        )
 
-    st.pydeck_chart(
-        pdk.Deck(
-            layers=[kde_layer],
-            initial_view_state=pdk.ViewState(
-                latitude=float(filtered_data['lat'].mean()),
-                longitude=float(filtered_data['lon'].mean()),
-                zoom=12,
-                pitch=0
+        st.pydeck_chart(
+            pdk.Deck(
+                layers=[kde_layer],
+                initial_view_state=pdk.ViewState(
+                    latitude=float(filtered_data['lat'].mean()),
+                    longitude=float(filtered_data['lon'].mean()),
+                    zoom=12,
+                    pitch=0
+                ),
+                map_style='light',
+                tooltip={
+                    "html":
+                        "<b>Ticket ID:</b> {ticket_id}<br/>"
+                        "<b>Category:</b> {predicted_category}<br/>"
+                        "<b>Density Score:</b> {density_formatted}"
+                }
             ),
-            map_style='light',
-            tooltip={
-                "html":
-                    "<b>Ticket ID:</b> {ticket_id}<br/>"
-                    "<b>Organization:</b> {organization}<br/>"
-                    "<b>Comment:</b> {comment}<br/>"
-                    "<b>Address:</b> {address}<br/>"
-                    "<b>Timestamp:</b> {timestamp_formatted}<br/>"
-                    "<b>Predicted Category:</b> {predicted_category}<br/>"
-                    "<b>Urgency Score:</b> {urgency_score_formatted}<br/>"
-                    "<b>State:</b> {state}"
-            }
-        ),
-        height=600
-    )
+            height=600
+        )
 
-    # Display statistics for KDE
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Min Density", f"{filtered_data['density'].min():.4f}")
-    with col2:
-        st.metric("Mean Density", f"{filtered_data['density'].mean():.4f}")
-    with col3:
-        st.metric("Max Density", f"{filtered_data['density'].max():.4f}")
+        # Display statistics for KDE
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Min Density", f"{d_min:.4f}")
+        with col2:
+            st.metric("Mean Density", f"{density.mean():.4f}")
+        with col3:
+            st.metric("Max Density", f"{d_max:.4f}")
 
-except Exception as e:
-    st.error(f"Error in KDE analysis: {e}")
+    except Exception as e:
+        st.error(f"Error in KDE analysis: {e}")
