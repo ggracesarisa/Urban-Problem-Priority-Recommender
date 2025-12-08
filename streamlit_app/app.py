@@ -9,7 +9,10 @@ from sklearn.neighbors import KernelDensity
 st.set_page_config(page_title="Bangkok Traffy Fondue", layout="wide")
 st.title("Bangkok Traffy Fondue Data Visualization")
 
-# Load and prepare data
+MAX_POINTS_MAP = 50000
+MAX_POINTS_KDE = 50000  
+ITEMS_PER_PAGE = 10
+
 @st.cache_data
 def load_data():
     parquet_path = 'data/master_dataset.parquet'
@@ -20,20 +23,13 @@ def load_data():
         st.warning(f"Data file not found at {parquet_path}. Please ensure the Airflow DAG has run.")
         data = pd.DataFrame()
 
-    # --- FIX 1: Remove Duplicate Columns ---
-    # This is the magic line that fixes your current error.
-    # It keeps the first occurrence of a column name and drops the rest.
     data = data.loc[:, ~data.columns.duplicated()]
 
-    # --- FIX 2: Ensure Lat/Lon are Numeric ---
-    # Sometimes they load as text strings, which breaks the math.
-    # We force them to be numbers (coercing errors to NaN).
     if 'lat' in data.columns:
         data['lat'] = pd.to_numeric(data['lat'], errors='coerce')
     if 'lon' in data.columns:
         data['lon'] = pd.to_numeric(data['lon'], errors='coerce')
 
-    # --- FIX 3: Add Missing Columns (Safety Defaults) ---
     required_defaults = {
         'lat': np.nan, 
         'lon': np.nan, 
@@ -52,18 +48,17 @@ def load_data():
         if col not in data.columns:
             data[col] = default_val
 
-    # Clean up coordinates
+    # limit comment length globally
+    data['comment'] = data['comment'].astype(str).str.slice(0, 300)
+
     data.dropna(subset=['lat', 'lon'], inplace=True)
     
     return data
 
-# Load data
 data = load_data()
 
-## Sidebar code
 st.sidebar.header("Filters")
 
-# Multiselect for districts
 districts = data['district'].unique().tolist()
 selected_districts = st.sidebar.multiselect(
     "Districts",
@@ -71,7 +66,6 @@ selected_districts = st.sidebar.multiselect(
     default=[]
 )
 
-#multiselect for incident types
 predicted_category = data['predicted_category'].unique().tolist()
 selected_predicted_category = st.sidebar.multiselect(
     "Incident Types",
@@ -79,20 +73,24 @@ selected_predicted_category = st.sidebar.multiselect(
     default=[]
 )
 
-# Urgency Score filter
 default_urgency_score = 1.0
 urgency_score_slider = st.sidebar.slider(
-    "Urgency Score",
+    "Urgency Score (max)",
     min_value=0.0001,
     max_value=1.0000,
     value=default_urgency_score,
     step=0.0001
 )
 
-# Date range filter
-data['timestamp'] = pd.to_datetime(data['timestamp'], format='mixed', errors='coerce')
+# zoom control for map
+zoom_level = st.sidebar.slider(
+    "Map zoom level",
+    min_value=8,
+    max_value=15,
+    value=12
+)
 
-# Filter out NaT values for date range calculation
+data['timestamp'] = pd.to_datetime(data['timestamp'], format='mixed', errors='coerce')
 valid_dates = data['timestamp'].dropna()
 
 if len(valid_dates) > 0:
@@ -105,7 +103,6 @@ if len(valid_dates) > 0:
         max_value=max_date
     )
 else:
-    # Default date range if no valid dates found
     default_date = datetime.now().date()
     selected_date_range = st.sidebar.date_input(
         "Date Range",
@@ -114,11 +111,10 @@ else:
         max_value=default_date
     )
 
-### Main panel code
 st.header("Traffic Incident Map")
 
-# Filter data based on selection
 filtered_data = data.copy()
+
 if selected_districts:
     filtered_data = filtered_data[filtered_data['district'].isin(selected_districts)]
 
@@ -131,7 +127,6 @@ filtered_data = filtered_data[
     (filtered_data['timestamp'].dt.date <= selected_date_range[1])
 ]
 
-# Main content
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.metric("Total Incidents", len(filtered_data))
@@ -141,41 +136,64 @@ with col3:
     st.metric("On going", len(filtered_data[filtered_data['state'] == 'กำลังดำเนินการ']))
 with col4:
     st.metric("Done", len(filtered_data[filtered_data['state'] == 'เสร็จสิ้น']))
-    
-# Urgency Score Map
-    
-# Create color mapping based on urgency score (green = low, red = high)
-# Use absolute scale: 0.0 = green, 1.0 = red
-def urgency_to_color(urgency_score):
-    # Normalize to 0-1 using fixed bounds (0.0 to 1.0)
-    normalized = min(max(urgency_score, 0.0), 1.0)  # Clamp to [0, 1]
+
+def urgency_to_color(urgency_score: float):
+    normalized = min(max(float(urgency_score), 0.0), 1.0)
     r = int(normalized * 255)
     g = int((1 - normalized) * 255)
     b = 0
-    return [r, g, b, 160]  # Added alpha channel
-    
-# Apply color mapping using absolute urgency score values
-if len(filtered_data) > 0:
-    filtered_data['urgency_color'] = filtered_data['urgency_score'].apply(urgency_to_color)
-    filtered_data['timestamp_formatted'] = filtered_data['timestamp'].dt.strftime('%Y-%m-%d %H:%M')
-    filtered_data['urgency_score_formatted'] = filtered_data['urgency_score'].apply(lambda x: f"{x:.4f}")
+    return [r, g, b, 160]
 
-    # Create scatter layer for urgency score
+if len(filtered_data) > 0:
+    n = len(filtered_data)
+
+    # adaptive, but always capped
+    if zoom_level <= 9:
+        max_points = min(2000, n)
+    elif zoom_level <= 11:
+        max_points = min(5000, n)
+    elif zoom_level <= 13:
+        max_points = min(10000, n)
+    else:
+        max_points = min(MAX_POINTS_MAP, n)
+
+    # always sample, never send full 98k
+    map_data = filtered_data.sample(max_points, random_state=42).copy()
+    st.caption(f"Showing {max_points} incidents at this zoom level out of {n} filtered incidents.")
+
+    map_data['urgency_color'] = map_data['urgency_score'].apply(urgency_to_color)
+    map_data['timestamp_formatted'] = map_data['timestamp'].dt.strftime('%Y-%m-%d %H:%M')
+    map_data['urgency_score_formatted'] = map_data['urgency_score'].apply(lambda x: f"{x:.4f}")
+    map_data['comment_short'] = map_data['comment'].astype(str).str.slice(0, 120)
+
+    # only keep columns needed by the map + tooltip
+    map_data = map_data[[
+        'lat', 'lon',
+        'urgency_color',
+        'ticket_id', 'organization',
+        'comment_short', 'address',
+        'timestamp_formatted',
+        'predicted_category',
+        'urgency_score_formatted',
+        'state'
+    ]]
+
     urgency_layer = pdk.Layer(
         "ScatterplotLayer",
-        filtered_data,
+        map_data,
         get_position=['lon', 'lat'],
         get_color='urgency_color',
         get_radius=100,
         pickable=True,
     )
+
     st.pydeck_chart(
         pdk.Deck(
             layers=[urgency_layer],
             initial_view_state=pdk.ViewState(
-                latitude=float(filtered_data['lat'].mean()),
-                longitude=float(filtered_data['lon'].mean()),
-                zoom=12,
+                latitude=float(map_data['lat'].mean()),
+                longitude=float(map_data['lon'].mean()),
+                zoom=zoom_level,
                 pitch=0
             ),
             map_style='light',
@@ -183,7 +201,7 @@ if len(filtered_data) > 0:
                 "html":
                     "<b>Ticket ID:</b> {ticket_id}<br/>"
                     "<b>Organization:</b> {organization}<br/>"
-                    "<b>Comment:</b> {comment}<br/>"
+                    "<b>Comment:</b> {comment_short}<br/>"
                     "<b>Address:</b> {address}<br/>"
                     "<b>Timestamp:</b> {timestamp_formatted}<br/>"
                     "<b>Predicted Category:</b> {predicted_category}<br/>"
@@ -194,7 +212,7 @@ if len(filtered_data) > 0:
         height=600
     )
 
-    # Display urgency statistics
+
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Min Urgency Score", f"{filtered_data['urgency_score'].min():.4f}")
@@ -202,99 +220,110 @@ if len(filtered_data) > 0:
         st.metric("Mean Urgency Score", f"{filtered_data['urgency_score'].mean():.4f}")
     with col3:
         st.metric("Max Urgency Score", f"{filtered_data['urgency_score'].max():.4f}")
-    
-    # View all highest urgency score locations with pagination
+
     st.subheader('All Incidents Sorted by Urgency Score')
-    
-    # Prepare all urgency data sorted by urgency score
+
     all_urgency = filtered_data[
-        ['ticket_id', 'organization', 'comment', 'address', 'timestamp_formatted', 'state', 'predicted_category', 'urgency_score']
-    ].sort_values('urgency_score', ascending=False).reset_index(drop=True)
+        ['ticket_id', 'organization', 'comment', 'address', 'timestamp', 'state', 'predicted_category', 'urgency_score']
+    ].copy()
+
+    all_urgency['timestamp_formatted'] = all_urgency['timestamp'].dt.strftime('%Y-%m-%d %H:%M')
     all_urgency['urgency_score'] = all_urgency['urgency_score'].apply(lambda x: f"{x:.4f}")
-    
-    # Pagination setup
-    items_per_page = 10
+    all_urgency['comment_short'] = all_urgency['comment'].astype(str).str.slice(0, 120)
+
+    all_urgency = all_urgency[
+        ['ticket_id', 'organization', 'comment_short', 'address', 'timestamp_formatted', 'state', 'predicted_category', 'urgency_score']
+    ].sort_values('urgency_score', ascending=False).reset_index(drop=True)
+
     total_items = len(all_urgency)
-    total_pages = (total_items + items_per_page - 1) // items_per_page
-    
-    # Initialize session state for page number
+    total_pages = (total_items + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+
     if 'urgency_page' not in st.session_state:
         st.session_state.urgency_page = 0
-    
-    # Display current page
-    start_idx = st.session_state.urgency_page * items_per_page
-    end_idx = start_idx + items_per_page
+
+    start_idx = st.session_state.urgency_page * ITEMS_PER_PAGE
+    end_idx = start_idx + ITEMS_PER_PAGE
     page_data = all_urgency.iloc[start_idx:end_idx]
-    
-    st.dataframe(page_data, width='stretch', height=400)
-    
-    # Pagination controls
+
+    st.dataframe(page_data, use_container_width=True, height=400)
+
     col1, col2, col3 = st.columns([2, 7, 1])
     with col1:
         if st.button("← Previous", key="prev_urgency"):
             if st.session_state.urgency_page > 0:
                 st.session_state.urgency_page -= 1
     with col2:
-        st.markdown(f"<div style='text-align: center'>Page {st.session_state.urgency_page + 1} of {total_pages} (Total: {total_items} incidents)</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='text-align: center'>Page {st.session_state.urgency_page + 1} of {total_pages} "
+            f"(Total: {total_items} incidents)</div>",
+            unsafe_allow_html=True
+        )
     with col3:
         if st.button("Next →", key="next_urgency"):
             if st.session_state.urgency_page < total_pages - 1:
                 st.session_state.urgency_page += 1
 
-# Kernel Density Estimation Analysis
 st.subheader("Kernel Density Estimation (KDE) Statistics")
 
-# FIX: Check if we have enough data points
 if len(filtered_data) < 2:
     st.info("KDE Analysis requires at least 2 data points. Please select a larger date range or more districts.")
 else:
     try:
-        # Prepare coordinates
-        coords = filtered_data[['lat', 'lon']].values
+        # decide sample size based on zoom, also capped by MAX_POINTS_KDE
+        n_kde = len(filtered_data)
+        if zoom_level <= 9:
+            max_kde_points = min(2000, n_kde, MAX_POINTS_KDE)
+        elif zoom_level <= 11:
+            max_kde_points = min(5000, n_kde, MAX_POINTS_KDE)
+        elif zoom_level <= 13:
+            max_kde_points = min(10000, n_kde, MAX_POINTS_KDE)
+        else:
+            max_kde_points = min(MAX_POINTS_KDE, n_kde)
 
-        # Fit KDE model
-        # Bandwidth needs to be adjusted based on data spread, but 0.005 is a safe default for city-scale
+        if n_kde > max_kde_points:
+            kde_source = filtered_data.sample(max_kde_points, random_state=42).copy()
+            st.caption(
+                f"KDE computed on a sample of {max_kde_points} incidents "
+                f"out of {n_kde} filtered incidents."
+            )
+        else:
+            kde_source = filtered_data.copy()
+            st.caption(f"KDE computed on all {n_kde} filtered incidents.")
+
+        coords = kde_source[['lat', 'lon']].values
+
         kde = KernelDensity(bandwidth=0.005, kernel='gaussian')
         kde.fit(coords)
-        
-        # Calculate density score for each point
+
         log_density = kde.score_samples(coords)
         density = np.exp(log_density)
-        
-        # Add density scores to dataframe
-        filtered_data['density'] = density
-        
-        # FIX: Handle normalization safely to avoid Divide By Zero (NaN)
-        d_min = density.min()
-        d_max = density.max()
-        
+
+        d_min = float(density.min())
+        d_max = float(density.max())
+
         if d_max == d_min:
-            # If all points have equal density (rare, but possible), set all to 0.5 (medium)
-            filtered_data['density_normalized'] = 0.5
+            density_normalized = np.full_like(density, 0.5)
         else:
-            filtered_data['density_normalized'] = (density - d_min) / (d_max - d_min)
-        
-        # Format density
-        filtered_data['density_formatted'] = filtered_data['density'].apply(lambda x: f"{x:.4f}")
-        
-        # Create color mapping based on density
-        def density_to_color(density_normalized):
-            # Ensure value is valid before converting (Double safety)
-            if pd.isna(density_normalized):
-                return [0, 0, 255, 160] # Default blue if NaN
-                
-            r = int(density_normalized * 255)
-            g = int((1 - abs(2 * density_normalized - 1)) * 255)
-            b = int((1 - density_normalized) * 255)
-            return [r, g, b, 160] 
-        
-        # Apply color mapping
-        filtered_data['density_color'] = filtered_data['density_normalized'].apply(density_to_color)
-    
-        # Create scatter layer for KDE
+            density_normalized = (density - d_min) / (d_max - d_min)
+
+        kde_source['density'] = density
+        kde_source['density_normalized'] = density_normalized
+        kde_source['density_formatted'] = kde_source['density'].apply(lambda x: f"{x:.4f}")
+
+        def density_to_color(dn):
+            if pd.isna(dn):
+                return [0, 0, 255, 160]
+            dn = float(dn)
+            r = int(dn * 255)
+            g = int((1 - abs(2 * dn - 1)) * 255)
+            b = int((1 - dn) * 255)
+            return [r, g, b, 160]
+
+        kde_source['density_color'] = kde_source['density_normalized'].apply(density_to_color)
+
         kde_layer = pdk.Layer(
             "ScatterplotLayer",
-            filtered_data,
+            kde_source,
             get_position=['lon', 'lat'],
             get_color='density_color',
             get_radius=100,
@@ -305,9 +334,9 @@ else:
             pdk.Deck(
                 layers=[kde_layer],
                 initial_view_state=pdk.ViewState(
-                    latitude=float(filtered_data['lat'].mean()),
-                    longitude=float(filtered_data['lon'].mean()),
-                    zoom=12,
+                    latitude=float(kde_source['lat'].mean()),
+                    longitude=float(kde_source['lon'].mean()),
+                    zoom=zoom_level,   # same zoom slider
                     pitch=0
                 ),
                 map_style='light',
@@ -321,12 +350,11 @@ else:
             height=600
         )
 
-        # Display statistics for KDE
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Min Density", f"{d_min:.4f}")
         with col2:
-            st.metric("Mean Density", f"{density.mean():.4f}")
+            st.metric("Mean Density", f"{float(density.mean()):.4f}")
         with col3:
             st.metric("Max Density", f"{d_max:.4f}")
 
