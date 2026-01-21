@@ -19,4 +19,5 @@ The system ranks problems based on **severity, urgency, location risk, and incid
 ![KDE Heatmap](./assets/demo-traffyfoundue1.png)
 
 ## Video Presentation
-🎥 https://youtu.be/wypN5l7B1CQ
+https://youtu.be/wypN5l7B1CQ
+
